@@ -50,6 +50,7 @@ from cinder.volume.drivers.vmware import volumeops
 from cinder.volume import volume_types
 
 from time import time
+import copy
 
 LOG = logging.getLogger(__name__)
 
@@ -642,7 +643,6 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
 
         If the volume does not have a backing then simply pass, else create
         a snapshot.
-        Snapshot of only available volume is supported.
 
         :param snapshot: Snapshot object
         """
@@ -658,7 +658,7 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
                                            snapshot['display_description'])
         elif volume['status'] == 'in-use':
             factory = self.session.vim.client.factory
-
+            
             # Get a reference to the shadow VM that is backing the volume
             backing_ref = self.volumeops.get_backing(snapshot['volume_name'])
 
@@ -669,106 +669,70 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
                 LOG.error(err_msg)
                 raise Exception(err_msg)
             backing_disk_uuid = backing_disks[0].backing.uuid
-            backing_disk_file_name = backing_disks[0].backing.fileName
-
+ 
             # The volume is in use -> it is attached
             all_attachments = volume['volume_attachment']
-
+ 
             # Pick the first, regardless of multi-attach
             attachment = all_attachments[0]
-
+ 
             # Find the vm by its uuid
             instance_uuid = attachment['instance_uuid']
             vm_ref = self.volumeops.get_vm_ref_from_vm_uuid(instance_uuid)
-
-            # Find the attached disk and prep the rest for removal
-            # note: removal of disks doesn't seem to work for me on vSphere 6.5
-            # in this way when cloning a vm. The vcenter does not fail,
-            # it simply add all disks in the clone...
-            dev_change = []
-            disk_key = None
+             
+#             # Create a new delta disk to capture the current disk content (as a parent in the backing chain)
+#             # The best option would be to create delta disk without creating snapshot
+#             attach_vm_snapshot_name = "{}-{}".format('deltaDiskSnapshot', time())
+#             snapshot_ref = self.volumeops.create_snapshot(vm_ref, attach_vm_snapshot_name, None)
+#              
+#             self.volumeops.delete_snapshot_ref(snapshot_ref, consolidate=False)
+             
+            # Determine the disk on the attach vm
             attached_disks = self.volumeops._get_disk_devices(vm_ref)
             for attached_disk in attached_disks:
-                if attached_disk.backing.uuid != backing_disk_uuid:
-                    # prep a device change for removal
-                    vdcs = factory.create('ns0:VirtualDeviceConfigSpec')
-                    vdcs.operation = "remove"
-                    vdcs.fileOperation = "destroy"
-                    vdcs.device = attached_disk
-                    dev_change.append(vdcs)
-                else:
-                    disk_key = attached_disk.key
+                if attached_disk.backing.uuid == backing_disk_uuid:
+                    break
             else:
-                if not disk_key:
-                    err_msg = "Unable to find disk in attachment destination vm."
-                    LOG.error(err_msg)
-                    raise Exception(err_msg)
+                err_msg = "Unable to find disk in attachment destination vm."
+                LOG.error(err_msg)
+                raise Exception(err_msg)
+ 
+            # determine the disk type
+            if attached_disk.backing.thinProvisioned:
+                disk_type = volumeops.VirtualDiskType.THIN
+            else:
+                disk_type = volumeops.VirtualDiskType.EAGER_ZEROED_THICK
+ 
+            # check if a storage profile needs to be associated with the backing VM
+            storage_profile_id = self._get_storage_profile_id(volume)
 
-            # Snapshot the VM
-            snapshotName = "tempVolumeSnapshot"
-            snapshot_ref = self.volumeops.create_snapshot(vm_ref, snapshotName, None)
-            with deferred(self.volumeops.delete_snapshot_ref, snapshot_ref):
-
-                # Clone from snapshot using full clone and discard all other disks
-                cloned_vm_ref = self.volumeops.clone_vm(vm_ref, snapshot_ref, dev_change)
-                with deferred(self.volumeops.delete_backing, cloned_vm_ref):
-
-                    # Determine the disk on the snapshot clone vm
-                    # note: looking up disk by key because the vcenter
-                    # is not honouring the device change specs -
-                    # - otherwise there would be a single disk in the cloned vm
-                    cloned_disks = self.volumeops._get_disk_devices(cloned_vm_ref)
-                    for disk_device in cloned_disks:
-                        if disk_device.key == disk_key:
-                            break # disk found
-                    else:
-                        err_msg = "Unable to find matching disk in cloned vm."
-
-                    # detach the new disk from the cloned vm
-                    LOG.debug("Detaching new disk from cloned vm {}.".format(cloned_vm_ref))
-                    self.volumeops.detach_disk_from_backing(cloned_vm_ref, disk_device)
-
-                    # check if a storage profile needs to be associated with the backing VM
-                    storage_profile_id = self._get_storage_profile_id(volume)
-
-                    # determine the disk type
-                    if disk_device.backing.thinProvisioned:
-                        disk_type = volumeops.VirtualDiskType.THIN
-                    else:
-                        disk_type = volumeops.VirtualDiskType.EAGER_ZEROED_THICK
-
-                    # replace the new disk on the backing vm
-                    virtual_disk_spec = self.volumeops._create_virtual_disk_config_spec(
-                        disk_device.capacityInBytes / 1024,
-                        disk_type,
-                        0, # will override
-                        storage_profile_id,
-                        disk_device.backing.fileName)
-
-                    # Match properties to replace the disk
-                    virtual_disk_spec.operation = 'edit'
-                    virtual_disk_spec.fileOperation = None
-                    virtual_disk_spec.device.controllerKey = backing_disks[0].controllerKey
-                    virtual_disk_spec.device.key = backing_disks[0].key
-
-                    # snapshot the backing vm before replacing the disk
-                    # otherwise nova will have issues detaching the volume
-                    backing_snapshot_name = "{}-{}".format(snapshot['name'], time())
-                    backing_prior = self.volumeops.create_snapshot(backing_ref,
-                                                                   backing_snapshot_name,
-                                                                   snapshot['display_description'])
-                    with deferred(self.volumeops.delete_snapshot_ref, backing_prior):
-                        with deferred(self.volumeops.revert_to_snapshot, backing_prior):
-
-                            # apply the disk replacement
-                            reconfigure_spec = factory.create('ns0:VirtualMachineConfigSpec')
-                            reconfigure_spec.deviceChange = [virtual_disk_spec]
-                            LOG.debug("Replacing disk on backing vm {}.".format(backing_ref))
-                            self.volumeops._reconfigure_backing(backing_ref, reconfigure_spec)
-
-                            # snapshot the backing vm
-                            self.volumeops.create_snapshot(backing_ref, snapshot['name'],
-                                                           snapshot['display_description'])
+            # Remove the disk
+            remove_disk_spec = self.volumeops._create_spec_for_disk_remove(attached_disk)
+             
+            # Create a new delta disk which has the
+            # original disk as its parent disk
+            create_delta_disk_spec = self.volumeops._create_blank_delta_disk_config_spec(attached_disk)
+             
+            add_delta_disk_vm_spec = factory.create('ns0:VirtualMachineConfigSpec')
+            add_delta_disk_vm_spec.deviceChange = [remove_disk_spec, create_delta_disk_spec]
+            LOG.debug("Adding delta disk to attach vm {}.".format(vm_ref))
+            self.volumeops._reconfigure_backing(vm_ref, add_delta_disk_vm_spec)
+             
+            # Replace the disk on shadow VM with the original (parent) from attach VM
+            backing_replacement_disk = backing_disks[0]
+            backing_replacement_disk.backing = copy.deepcopy(attached_disk.backing.parent)
+  
+            virtual_disk_spec = self.volumeops._create_disk_backing_replacement_config_spec(
+                backing_replacement_disk, storage_profile_id)
+  
+            reconfigure_spec = factory.create('ns0:VirtualMachineConfigSpec')
+            reconfigure_spec.deviceChange = [virtual_disk_spec]
+            LOG.debug("Replacing disk on backing vm {}.".format(backing_ref))
+            self.volumeops._reconfigure_backing(backing_ref, reconfigure_spec)
+            
+            # snapshot the backing vm
+            self.volumeops.create_snapshot(backing_ref, snapshot['name'],
+                                               snapshot['display_description'])
         else:
             msg = _("Snapshot of volume not supported in "
                     "state: %s.") % volume['status']
@@ -2221,14 +2185,3 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
         :param src_vref: Source Volume object
         """
         self._create_cloned_volume(volume, src_vref)
-
-@contextlib.contextmanager
-def deferred(func, *args):
-    """ Yields and calls func with the rest of the args on closing """
-    try:
-        yield
-    finally:
-        try:
-            func(*args)
-        except Exception as e:
-            LOG.error("Deferred call raised an exception - {}".format(e))

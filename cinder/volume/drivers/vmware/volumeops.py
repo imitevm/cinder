@@ -30,6 +30,7 @@ from cinder.i18n import _, _LE, _LI
 from cinder.volume.drivers.vmware import exceptions as vmdk_exceptions
 
 from time import time
+import copy
 
 LOG = logging.getLogger(__name__)
 LINKED_CLONE_TYPE = 'linked'
@@ -715,6 +716,39 @@ class VMwareVolumeOps(object):
             disk_spec.profile = [disk_profile]
 
         return disk_spec
+    
+    def _create_blank_delta_disk_config_spec(self, parent_disk_device):
+        """Returns config spec for adding a blank delta disk on top of an existing disk."""
+        cf = self._session.vim.client.factory
+
+        disk_spec = cf.create('ns0:VirtualDeviceConfigSpec')
+        disk_spec.operation = 'add'
+        disk_spec.fileOperation = 'create'
+        disk_spec.device = copy.copy(parent_disk_device)
+        
+        disk_spec.device.backing = cf.create('ns0:VirtualDiskFlatVer2BackingInfo')
+        disk_spec.device.backing.datastore = copy.copy(parent_disk_device.backing.datastore)
+        disk_spec.device.backing.diskMode = parent_disk_device.backing.diskMode
+        disk_spec.device.backing.fileName = '[' + self.get_summary(parent_disk_device.backing.datastore).name + ']'
+        disk_spec.device.backing.parent = copy.copy(parent_disk_device.backing)
+        #disk_spec.device.backing.deltaDiskFormat = 'redoLogFormat'
+        
+        return disk_spec
+
+    def _create_disk_backing_replacement_config_spec(self, disk_device,
+                                                     profile_id):
+        """Returns config spec for replacing a virtual disk with the given one."""
+        cf = self._session.vim.client.factory
+
+        disk_spec = cf.create('ns0:VirtualDeviceConfigSpec')
+        disk_spec.operation = 'edit'
+        disk_spec.device = disk_device
+        if profile_id:
+            disk_profile = cf.create('ns0:VirtualMachineDefinedProfileSpec')
+            disk_profile.profileId = profile_id
+            disk_spec.profile = [disk_profile]
+
+        return disk_spec
 
     def _create_specs_for_disk_add(self, size_kb, disk_type, adapter_type,
                                    profile_id, vmdk_ds_file_path=None):
@@ -1109,11 +1143,11 @@ class VMwareVolumeOps(object):
         LOG.info(_LI("Successfully deleted snapshot: %(name)s of backing: "
                      "%(backing)s."), {'backing': backing, 'name': name})
 
-    def delete_snapshot_ref(self, snapshot_ref):
+    def delete_snapshot_ref(self, snapshot_ref, consolidate=True):
         """Deletes a snapshot by its managed object reference"""
         task = self._session.invoke_api(self._session.vim,
                                         'RemoveSnapshot_Task',
-                                        snapshot_ref, removeChildren=False)
+                                        snapshot_ref, removeChildren=False, consolidate=consolidate)
 
         self._session.wait_for_task(task)
 
