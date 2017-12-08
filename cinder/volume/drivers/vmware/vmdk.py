@@ -256,7 +256,9 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
         if not self._volumeops:
             max_objects = self.configuration.vmware_max_objects_retrieval
             self._volumeops = volumeops.VMwareVolumeOps(self.session,
-                                                        max_objects)
+                                                        max_objects,
+                                                        EXTENSION_KEY,
+                                                        EXTENSION_TYPE)
         return self._volumeops
 
     @property
@@ -769,6 +771,8 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
     def _delete_snapshot_template_format(self, snapshot):
         template = self._get_template_by_inv_path(snapshot.provider_location)
         self.volumeops.delete_backing(template)
+        LOG.info(_LI("Successfully deleted snapshot: %s. VM template-based."),
+                 snapshot['name'])
 
     def _delete_snapshot(self, snapshot):
         """Delete snapshot.
@@ -782,8 +786,8 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
 
         backing = self.volumeops.get_backing(snapshot.volume_name)
         if not backing:
-            LOG.debug("Backing does not exist for volume.",
-                      resource=snapshot.volume)
+            LOG.info(_LI("There is no backing, and so there is no "
+                         "snapshot: %s."), snapshot['name'])
         elif is_template:
             self._delete_snapshot_template_format(snapshot)
         else:
@@ -796,6 +800,8 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
                 raise exception.InvalidSnapshot(reason=msg)
             else:
                 self.volumeops.delete_snapshot(backing, snapshot.name)
+                LOG.info(_LI("Successfully deleted snapshot: %s."),
+                         snapshot['name'])
 
     def delete_snapshot(self, snapshot):
         """Delete snapshot.
@@ -2194,9 +2200,9 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
         """
         backing = self.volumeops.get_backing(snapshot['volume_name'])
         if not backing:
-            LOG.info("There is no backing for the snapshotted volume: "
-                     "%(snap)s. Not creating any backing for the "
-                     "volume: %(vol)s.",
+            LOG.info(_LI("There is no backing for the snapshotted volume: "
+                         "%(snap)s. Not creating any backing for the "
+                         "volume: %(vol)s."),
                      {'snap': snapshot['name'], 'vol': volume['name']})
             return
 
@@ -2207,9 +2213,9 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
             snapshot_moref = self.volumeops.get_snapshot(backing,
                                                          snapshot['name'])
             if not snapshot_moref:
-                LOG.info("There is no snapshot point for the snapshotted "
-                         "volume: %(snap)s. Not creating any backing for "
-                         "the volume: %(vol)s.",
+                LOG.info(_LI("There is no snapshot point for the snapshotted "
+                             "volume: %(snap)s. Not creating any backing for "
+                             "the volume: %(vol)s."),
                          {'snap': snapshot['name'], 'vol': volume['name']})
                 return
             clone_type = VMwareVcVmdkDriver._get_clone_type(volume)
