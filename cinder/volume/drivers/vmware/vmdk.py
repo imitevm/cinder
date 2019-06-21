@@ -1334,6 +1334,7 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
         datacenter = self.volumeops.get_dc(backing)
         self.volumeops.extend_virtual_disk(new_size_in_gb, root_vmdk_path,
                                            datacenter)
+        self.volumeops.reload_backing(backing)
 
     def clone_image(self, context, volume, image_location,
                     image_meta, image_service):

@@ -374,6 +374,15 @@ class VMwareVolumeOps(object):
         self._session.wait_for_task(task)
         LOG.info("Deleted the VM backing: %s.", backing)
 
+    def reload_backing(self, backing):
+        """Reload the backing.
+
+        :param backing: Managed object reference to the backing
+        """
+        LOG.debug("Reloading the VM backing: %s.", backing)
+        self._session.invoke_api(self._session.vim, 'Reload', backing)
+        LOG.info("Reloaded the VM backing: %s.", backing)
+
     # TODO(kartikaditya) Keep the methods not specific to volume in
     # a different file
     def get_host(self, instance):
