@@ -337,7 +337,8 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
                 'storage_protocol': 'vmdk',
                 'reserved_percentage': self.configuration.reserved_percentage,
                 'total_capacity_gb': 'unknown',
-                'free_capacity_gb': 'unknown'}
+                'free_capacity_gb': 'unknown',
+                'thin_provisioning_support': True}
         client_factory = self.session.vim.client.factory
         object_specs = []
         if (self._storage_policy_enabled and
